@@ -161,4 +161,3 @@ bbproxy > bbproxy.log 2>&1
 3. 对于一般性问题或讨论，请在 [Discussions](https://github.com/jacoblai/bbproxy/discussions) 中开启一个新话题。
 
 对于安全相关的问题，请发送邮件至 security@yourdomain.com，而不是开启公开的 issue。
-```
