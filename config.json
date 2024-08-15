@@ -1,8 +1,9 @@
 {
   "domains": {
-    "example.com": ["localhost:8080", "localhost:8081"],
-    "another.com": ["localhost:8082", "localhost:8083"]
+    "example.com": ["backend1.example.com:443", "backend2.example.com:443"],
+    "another-example.com": ["backend3.example.com:443"]
   },
   "circuit_breaker_threshold": 5,
-  "circuit_breaker_timeout": "30s"
+  "circuit_breaker_timeout": "1m",
+  "cert_cache_path": "/path/to/certs"
 }

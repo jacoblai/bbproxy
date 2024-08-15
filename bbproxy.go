@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -25,6 +25,7 @@ type Config struct {
 	Domains                 map[string][]string `json:"domains"`
 	CircuitBreakerThreshold int                 `json:"circuit_breaker_threshold"`
 	CircuitBreakerTimeout   time.Duration       `json:"circuit_breaker_timeout"`
+	CertCachePath           string              `json:"cert_cache_path"` // 新增字段
 }
 
 type ProxyServer struct {
@@ -34,6 +35,7 @@ type ProxyServer struct {
 	tlsConfig       *tls.Config
 	metricsRegistry metrics.Registry
 	watcher         *fsnotify.Watcher
+	httpServer      *http.Server
 }
 
 type BackendManager struct {
@@ -72,6 +74,16 @@ type BackendMetrics struct {
 	ResponseTime metrics.Timer
 }
 
+func (s *ProxyServer) initHTTPServer() {
+	mux := http.NewServeMux()
+	mux.Handle("/.well-known/acme-challenge/", s.certManager.HTTPHandler(nil))
+
+	s.httpServer = &http.Server{
+		Addr:    ":80",
+		Handler: mux,
+	}
+}
+
 func NewProxyServer(ctx context.Context, config *Config) (*ProxyServer, error) {
 	backendManager, err := NewBackendManager(config)
 	if err != nil {
@@ -106,7 +118,7 @@ func (s *ProxyServer) initCertManager() error {
 	s.certManager = &autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(domains...),
-		Cache:      autocert.DirCache("/path/to/certs"),
+		Cache:      autocert.DirCache(s.config.CertCachePath), // 使用配置中的路径
 	}
 
 	s.tlsConfig = &tls.Config{
@@ -120,8 +132,19 @@ func (s *ProxyServer) initCertManager() error {
 func (s *ProxyServer) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
+	// 启动 HTTPS 服务
 	g.Go(func() error {
 		return s.serveHTTPS(ctx)
+	})
+
+	// 启动 HTTP 服务（用于 ACME 挑战）
+	g.Go(func() error {
+		log.Println("Starting HTTP server on :80 for ACME challenges")
+		err := s.httpServer.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			return fmt.Errorf("HTTP server error: %v", err)
+		}
+		return nil
 	})
 
 	g.Go(func() error {
@@ -500,7 +523,7 @@ func NewBackendMetrics(address string) *BackendMetrics {
 }
 
 func loadConfig(filename string) (*Config, error) {
-	data, err := ioutil.ReadFile(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -508,6 +531,11 @@ func loadConfig(filename string) (*Config, error) {
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
+	}
+
+	// 可以在这里添加配置验证
+	if config.CertCachePath == "" {
+		return nil, fmt.Errorf("cert_cache_path is required in the configuration")
 	}
 
 	return &config, nil
@@ -527,15 +555,38 @@ func main() {
 		log.Fatalf("Failed to create proxy server: %v", err)
 	}
 
+	server.initHTTPServer()
+
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Shutdown error: %v", err)
+		}
 		cancel()
 	}()
 
 	if err := server.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+func (s *ProxyServer) Shutdown(ctx context.Context) error {
+	// 关闭 HTTPS 监听器（假设你有一个方法来做这个）
+	// 如果没有，你可能需要重构 serveHTTPS 方法以便能够优雅关闭
+
+	// 关闭 HTTP 服务器
+	if err := s.httpServer.Shutdown(ctx); err != nil {
+		return fmt.Errorf("HTTP server shutdown error: %v", err)
+	}
+
+	// 关闭其他资源
+	s.watcher.Close()
+	s.backendManager.CloseAll(ctx)
+
+	return nil
 }
